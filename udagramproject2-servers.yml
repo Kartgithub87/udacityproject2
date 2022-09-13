@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+            This cloudformation script is developed to deploy the webservers, loadbalancers to achieve highavailabilty environment
+            with auto-scaling functionality
+            Project Name: UdagramProject2-Karthick
+            Author: Karthick Kuppuswamy
+
+Parameters:
+    EnvironmentName:
+      Description: An environment name that will be prefixed to resource names
+      Type: String
+
+    InstanceTypeBastion:
+      Description: Amazon EC2 instance type for the instances
+      Type: String
+      AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      Default: t3.micro 
+
+    InstanceType:
+      Description: Amazon EC2 instance type for the instances
+      Type: String
+      AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      Default: t3.small
+
+    AMItoUse:
+      Description: AMI to use for our base image
+      Type: String    
+
+Resources:
+
+  RoleForS3Access:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ec2.amazonaws.com
+              Action:
+               - 'sts:AssumeRole'
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+    
+  ServerInstanceProfile:
+      Type: 'AWS::IAM::InstanceProfile'
+      Properties:
+        Roles:
+          - !Ref RoleForS3Access
+          
+  LBSecGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Allow http to our load balancer
+        VpcId:
+          Fn::ImportValue:
+            !Sub "${EnvironmentName}-VPCID"
+        SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  WebServerSecGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Allow http to our hosts and SSH from local only
+        VpcId:
+          Fn::ImportValue:
+            !Sub "${EnvironmentName}-VPCID"
+        SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        SecurityGroupEgress:    
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+        Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName 
+
+  BastionServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceTypeBastion
+      ImageId: !Ref AMItoUse
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet: 
+            - Ref: "WebServerSecGroup"
+          SubnetId: 
+            Fn::ImportValue:
+              !Sub "${EnvironmentName}-PUB1-SN"            
+
+  WebAppLaunchConfig:
+      Type: AWS::AutoScaling::LaunchConfiguration
+      Properties:
+        InstanceType: !Ref InstanceType
+        ImageId: !Ref AMItoUse
+        IamInstanceProfile: !Ref ServerInstanceProfile
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            sudo apt-get update -y
+            sleep 2
+            sudo apt-get install apache2 -y
+            sleep 2
+            sudo systemctl start apache2.service
+            sleep 2
+            sudo apt-get install awscli -y
+            cd /var/www/html
+            aws s3 cp s3://mybucket-082790163495-project2/index.html .
+            sleep 2        
+            sudo systemctl restart apache2.service
+        SecurityGroups:
+        - Ref: WebServerSecGroup
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'      
+
+  WebAppGroup:
+      Type: AWS::AutoScaling::AutoScalingGroup
+      Properties:
+        VPCZoneIdentifier:
+        - Fn::ImportValue: 
+            !Sub "${EnvironmentName}-PRIV-NETS"
+        LaunchConfigurationName:
+          Ref: WebAppLaunchConfig
+        MinSize: '4'
+        MaxSize: '6'
+        TargetGroupARNs:
+        - Ref: WebAppTargetGroup
+
+  WebAppLB:
+      Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+      Properties:
+        Subnets:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+        SecurityGroups:
+        - Ref: LBSecGroup
+
+  Listener:
+      Type: AWS::ElasticLoadBalancingV2::Listener
+      Properties:
+        DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: WebAppTargetGroup
+        LoadBalancerArn:
+          Ref: WebAppLB
+        Port: '80'
+        Protocol: HTTP
+
+  ALBListenerRule:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+        - Type: forward
+          TargetGroupArn: !Ref 'WebAppTargetGroup'
+        Conditions:
+        - Field: path-pattern
+          Values: [/]
+        ListenerArn: !Ref 'Listener'
+        Priority: 1
+        
+  WebAppTargetGroup:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        HealthCheckIntervalSeconds: 10
+        HealthCheckPath: /
+        HealthCheckProtocol: HTTP
+        HealthCheckTimeoutSeconds: 8
+        HealthyThresholdCount: 2
+        Port: 80
+        Protocol: HTTP
+        UnhealthyThresholdCount: 5
+        VpcId: 
+          Fn::ImportValue:
+            Fn::Sub: "${EnvironmentName}-VPCID"        
+    
+ 
+# Outputs to export the resource values, so can be used by other stacks
+Outputs: 
+  
+  LoadBalancerDNSName:
+      Description: The DNSName of load balancer
+      Value:  !Join [ "//", [ 'http:', !GetAtt WebAppLB.DNSName ] ]
+      Export:
+        Name: !Sub ${EnvironmentName}-LB
+
+  WebAppTargetGroup:
+      Description: The webapp target group
+      Value:  !Ref WebAppTargetGroup
+      Export:
+        Name: !Sub ${EnvironmentName}-WebAppTargetGP
+
+  WebServerSecGroup:
+      Description: The webserver security group
+      Value:  !Ref WebServerSecGroup
+      Export:
+        Name: !Sub ${EnvironmentName}-WebServerSecGP
+
+  LBSecGroup:
+      Description: The load balancer security group
+      Value:  !Ref LBSecGroup
+      Export:
+        Name: !Sub ${EnvironmentName}-LBSecGP
+
+  BastionServerInstance:
+      Description: The Bastion Host
+      Value:  !Ref BastionServerInstance
+      Export:
+        Name: !Sub ${EnvironmentName}-Bastion
+       
+    
+
+
+

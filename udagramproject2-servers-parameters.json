@@ -1,0 +1,18 @@
+[
+    {
+        "ParameterKey": "EnvironmentName",
+        "ParameterValue": "UdagramProject2-Karthick"
+    },
+    {
+		"ParameterKey": "InstanceTypeBastion",
+		"ParameterValue": "t3.micro"
+	},
+    {
+		"ParameterKey": "InstanceType",
+		"ParameterValue": "t3.small"
+	},
+    { 
+        "ParameterKey": "AMItoUse",
+        "ParameterValue": "ami-0e472ba40eb589f49"
+    } 
+]
